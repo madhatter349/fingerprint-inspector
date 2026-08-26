@@ -7,6 +7,9 @@ import fs from "node:fs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 
+// Disable Express's auto ETag so our custom supercookie ETag isn't overridden.
+app.disable("etag");
+
 // Minimal cookie parser (avoids a dependency).
 function getCookie(req, name) {
   const header = req.headers.cookie || "";
@@ -205,32 +208,44 @@ app.get("/api/lab/cookie", (req, res) => {
 //    the next visit with If-None-Match -> server reads the ID from the request.
 //    Survives cookie deletion (cache persists) and even some incognito windows
 //    (Chrome incognito keeps the cache from the session that opened it).
+//    NOTE: a same-page double fetch won't send If-None-Match reliably (Chrome's
+//    memory cache serves 200), so the honest demonstration is across page loads:
+//    the server records every ID it issues, and on a later page load the browser
+//    presents the same cached ETag -> the server recognizes it as returning.
+const issuedEtagIds = new Set();
 app.get("/api/lab/etag", (req, res) => {
   const inMatch = req.headers["if-none-match"] || "";
   const cached = /^W\/"fp-([0-9a-f]+)"/.exec(inMatch);
-  const id = cached ? cached[1] : crypto.randomUUID().replace(/-/g, "").slice(0, 12);
-  // Weak ETag so browsers always cache; value doubles as the visitor ID.
+  let id = cached ? cached[1] : null;
+  let isReturning = false;
+  if (id) {
+    isReturning = issuedEtagIds.has(id);
+  } else {
+    id = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+  }
+  issuedEtagIds.add(id);
+  const firstSeen = !isReturning;
+
+  const body = JSON.stringify({
+    etagId: id,
+    isReturning,
+    ifNoneMatch: inMatch || null,
+    note: isReturning
+      ? `RE-IDENTIFIED: your browser sent back the ETag "fp-${id}" from its HTTP cache on this second load of the SAME URL. No cookie involved — this ID survives cookie deletion and, in some browsers, incognito.`
+      : "First load: we assigned you an ETag ID. Reload the page (or re-run) to see the browser send it back via If-None-Match — that's the supercookie."
+  });
+  res.status(200);
   res.setHeader("ETag", `W/"fp-${id}"`);
-  res.setHeader("Cache-Control", "private, max-age=31536000, immutable");
-  res.setHeader("Content-Type", "image/svg+xml");
-  res.send(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect width="1" height="1" fill="#00000000"/></svg>`
-  );
+  // Revalidation-friendly: short freshness so the browser actually re-checks with
+  // If-None-Match across page loads (a real ETag tracker does this).
+  res.setHeader("Cache-Control", "private, max-age=0, must-revalidate");
+  res.setHeader("Content-Type", "application/json");
+  res.setHeader("Content-Length", Buffer.byteLength(body));
+  res.setHeader("X-Accel-Buffering", "no"); // hint proxies not to interfere
+  res.end(body); // bypass Express res.json() freshness check (which would 304)
 });
 
-// ETag probe: report what the browser has cached for us.
-app.get("/api/lab/etag/probe", (req, res) => {
-  const inMatch = req.headers["if-none-match"] || "";
-  const cached = /^W\/"fp-([0-9a-f]+)"/.exec(inMatch);
-  res.json({
-    etagId: cached ? cached[1] : null,
-    isCached: !!cached,
-    viaHeader: inMatch || null,
-    note: cached
-      ? "Your browser sent back the ETag ID we gave you earlier — we recognized you across page loads from the HTTP cache, with NO cookie."
-      : "No cached ETag yet. Load the ETag endpoint first, then reload this probe to see the browser 'phone home' its ID."
-  });
-});
+// ETag probe is now built into /api/lab/etag itself (same-URL re-fetch).
 
 // 3. Referrer / navigation journey: what the server learns about where you came from.
 app.get("/api/lab/referrer", (req, res) => {

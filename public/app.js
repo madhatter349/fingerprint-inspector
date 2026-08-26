@@ -157,9 +157,34 @@ async function runTrackingLab() {
 
   // 1. First-party cookie
   await probe("cookie", "/api/lab/cookie");
-  // 2. ETag supercookie: load the tiny SVG (caches it), then probe reads it back.
-  try { await fetch("/api/lab/etag", { cache: "no-store" }); } catch (e) {}
-  await probe("etag", "/api/lab/etag/probe");
+  // 2. ETag supercookie: load the ETag URL as an <img> (real HTTP-cache behavior,
+  //    like a tracking pixel). First visit assigns + caches an ID; on page reload
+  //    the browser revalidates and sends If-None-Match, so the server returns
+  //    isReturning:true. The server records issued IDs to recognize returns.
+  let etagResult = null;
+  try {
+    // Load as image so the response lands in the HTTP cache (not fetch memory).
+    await new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve();
+      img.onerror = () => resolve();
+      img.src = "/api/lab/etag";
+    });
+    // Now read what the server says: on first visit it assigned an ID and cached
+    // it. The JSON body tells us if THIS load presented a previously-cached ETag.
+    const r = await fetch("/api/lab/etag", { cache: "no-store" });
+    const body = await r.json().catch(() => null);
+    etagResult = {
+      ...(body || {}),
+      reidentifiedViaCache: !!(body && body.isReturning),
+      note: body && body.isReturning
+        ? `RE-IDENTIFIED: your browser presented the cached ETag "fp-${body.etagId}" on this page load. The server recognized you from the HTTP cache with NO cookie.`
+        : "An ETag ID was assigned and stored in your browser's HTTP cache. Reload this page and the server will recognize it — that's the supercookie."
+    };
+  } catch (e) {
+    etagResult = { error: e.message };
+  }
+  results.etag = etagResult;
   // 3. Referrer journey
   await probe("referrer", "/api/lab/referrer");
   // 4. Correlated profile (cookie + etag + ip)
@@ -193,15 +218,15 @@ function renderLab(results) {
   const cookieC = results.cookie && results.cookie.isNew === false
     ? tag("you're already identified", "bad")
     : results.cookie ? tag("new visitor", "good") : "";
-  const etagC = results.etag && results.etag.isCached
-    ? tag("re-identified via cache, NO cookie", "bad")
-    : results.etag ? tag("not cached yet — refresh to see it persist", "warn") : "";
+  const etagC = results.etag && results.etag.reidentifiedViaCache
+    ? tag("RE-IDENTIFIED via cache, NO cookie", "bad")
+    : results.etag && !results.etag.error ? tag("assigned — reload to see it persist", "warn") : "";
 
   let html = '<div class="grid">';
   html += card("1. First-party cookie", results.cookie || { error: "failed" }, cookieC,
     "Every site sets one of these. It's your 'visitor ID' for that site. Cleared only by clearing cookies or incognito.");
   html += card("2. ETag supercookie (cache)", results.etag || { error: "failed" }, etagC,
-    "Your browser caches this tiny SVG with a unique ETag. Next visit, the browser sends the ETag back in If-None-Match — the site reads your ID from the HTTP cache with NO cookie. Survives cookie clearing.");
+    "We fetched the same URL twice. On the 2nd fetch your browser sent back the ETag from its HTTP cache (If-None-Match) — the site reads your ID with NO cookie. Survives cookie clearing.");
   html += card("3. Where you came from (referrer)", results.referrer || { error: "failed" },
     results.referrer && results.referrer.referer ? tag("leaked", "bad") : tag("absent", "good"),
     "Sites see the page you were on before this one via the Referer header. This is how ads and analytics know you came from a search, a social post, or a newsletter.");
