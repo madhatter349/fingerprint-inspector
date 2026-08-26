@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fingerprint Inspector</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <h1>Fingerprint Inspector</h1>
+    <p class="subtitle">What your browser reveals about you — audio, canvas, WebGL, fonts, WebRTC, and more. All checks run locally in this tab.</p>
+  </header>
+
+  <main>
+    <section id="status" class="card">
+      <h2>Run status</h2>
+      <div id="statusText">Initializing…</div>
+      <div class="actions">
+        <button id="runBtn" class="btn primary">Run checks</button>
+        <button id="saveBtn" class="btn" disabled>Save this visit</button>
+        <button id="historyBtn" class="btn" disabled>Load visit history</button>
+      </div>
+    </section>
+
+    <section id="fingerprint" class="card" hidden>
+      <h2>Your fingerprint ID</h2>
+      <div id="fpId" class="fingerprint"></div>
+      <p class="muted" id="fpNote"></p>
+    </section>
+
+    <section id="signals" class="card" hidden>
+      <h2>Signals</h2>
+      <div id="signalsGrid" class="grid"></div>
+    </section>
+
+    <section id="history" class="card" hidden>
+      <h2>Visit history</h2>
+      <p class="muted">Visits saved to this server. A stable fingerprint across tabs and incognito means a site could identify you cookie-free.</p>
+      <div id="historyBody"></div>
+    </section>
+
+    <section id="compare" class="card" hidden>
+      <h2>Identifiability / cross-session comparison</h2>
+      <div id="compareBody"></div>
+    </section>
+  </main>
+
+  <footer>
+    <p>This tool only inspects your own browser. It does not call any third-party trackers.</p>
+  </footer>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
