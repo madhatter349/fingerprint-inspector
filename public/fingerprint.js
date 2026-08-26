@@ -142,6 +142,17 @@ function collectWebGLFingerprint() {
     maxTextureSize: gl.getParameter(gl.MAX_TEXTURE_SIZE),
     maxViewportDims: gl.getParameter(gl.MAX_VIEWPORT_DIMS)
   };
+  // Unmasked renderer: this is what real trackers read. Chrome masks the string
+  // in gl.RENDERER, but WEBGL_debug_renderer_info exposes the real GPU.
+  try {
+    const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+    if (dbg) {
+      glInfo.unmaskedRenderer = String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL));
+      glInfo.unmaskedVendor = String(gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL));
+    }
+  } catch (e) {
+    glInfo.unmaskedError = String(e.message || e);
+  }
   const extensions = (gl.getSupportedExtensions() || []).sort();
   return { ...glInfo, extensions: extensions.length, supported: true, hash: hashString(JSON.stringify(glInfo) + extensions.join("|")) };
 }
@@ -335,28 +346,49 @@ function collectUserAgentInfo() {
   return { ...data, hash: hashString(ua + navigator.platform + navigator.language) };
 }
 
-// ---- Client hints (JS-accessible subset) ----
-function collectClientHints() {
+// ---- Client hints (JS-accessible subset + high-entropy) ----
+async function collectClientHints() {
   const nav = navigator;
-  return {
-    uaData: nav.userAgentData
-      ? {
-          brands: nav.userAgentData.brands,
-          mobile: nav.userAgentData.mobile,
-          platform: nav.userAgentData.platform,
-          fullVersionList: nav.userAgentData.highEntropyValues
-            ? null // filled below if available
-            : null
-        }
-      : null,
+  const out = {
+    uaData: null,
+    highEntropy: null,
     deviceMemory: nav.deviceMemory || null,
     hardwareConcurrency: nav.hardwareConcurrency || null,
-    maxTouchPoints: nav.maxTouchPoints || 0,
-    hash: hashString(
-      JSON.stringify(nav.userAgentData ? nav.userAgentData.brands : "") +
-      (nav.deviceMemory || "") + (nav.hardwareConcurrency || "") + (nav.maxTouchPoints || 0)
-    )
+    maxTouchPoints: nav.maxTouchPoints || 0
   };
+
+  if (nav.userAgentData) {
+    out.uaData = {
+      brands: nav.userAgentData.brands,
+      mobile: nav.userAgentData.mobile,
+      platform: nav.userAgentData.platform
+    };
+    // getHighEntropyValues needs a secure context and user permission in Chrome.
+    if (typeof nav.userAgentData.getHighEntropyValues === "function") {
+      try {
+        const he = await nav.userAgentData.getHighEntropyValues([
+          "architecture", "bitness", "model", "platformVersion", "fullVersionList", "wow64"
+        ]);
+        out.highEntropy = {
+          architecture: he.architecture,
+          bitness: he.bitness,
+          model: he.model,
+          platformVersion: he.platformVersion,
+          fullVersionList: he.fullVersionList,
+          wow64: he.wow64
+        };
+      } catch (e) {
+        out.highEntropy = { error: String(e.message || e) };
+      }
+    }
+  }
+
+  out.hash = hashString(
+    JSON.stringify(out.uaData ? out.uaData.brands : "") +
+    JSON.stringify(out.highEntropy || "") +
+    (nav.deviceMemory || "") + (nav.hardwareConcurrency || "") + (nav.maxTouchPoints || 0)
+  );
+  return out;
 }
 
 // ---- Locale / timezone ----
@@ -435,20 +467,45 @@ function collectVoices() {
 }
 
 // ---- API surface (adds to uniqueness) ----
-function collectApiPresence() {
+async function collectApiPresence() {
   const props = [
     "serviceWorker", "geolocation", "mediaDevices", "bluetooth", "usb", "hid", "serial",
     "permissions", "credentials", "storage", "indexedDB", "caches", "scheduling",
     "share", "vibrate", "getBattery", "wakeLock", "contacts", "doNotTrack",
-    "webdriver", "languages", "pdfViewerEnabled", "serial", "wakeLock"
+    "webdriver", "languages", "pdfViewerEnabled"
   ];
-  const found = props.filter((p) => typeof navigator[p] !== "undefined" || (p === "vibrate" && typeof navigator.vibrate === "function"));
+  const found = [...new Set(props.filter((p) => typeof navigator[p] !== "undefined" || (p === "vibrate" && typeof navigator.vibrate === "function")))];
   const canvasOps = (() => {
     const c = document.createElement("canvas");
     const gl = c.getContext("webgl") || c.getContext("experimental-webgl");
-    return gl ? { vendor: gl.getParameter(gl.VENDOR), renderer: gl.getParameter(gl.RENDERER) } : null;
+    if (!gl) return null;
+    try {
+      const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+      return dbg
+        ? { unmaskedRenderer: String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)), unmaskedVendor: String(gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL)) }
+        : { renderer: gl.getParameter(gl.RENDERER), vendor: gl.getParameter(gl.VENDOR) };
+    } catch (e) {
+      return { error: String(e.message || e) };
+    }
   })();
-  return { exposed: found, count: found.length, webgl: canvasOps, hash: hashString(found.join("|") + JSON.stringify(canvasOps)) };
+
+  // Media devices: without permission we only see labels like "Default".
+  let mediaDevices = null;
+  try {
+    if (navigator.mediaDevices && typeof navigator.mediaDevices.enumerateDevices === "function") {
+      mediaDevices = (await navigator.mediaDevices.enumerateDevices()).map((d) => d.kind + ":" + d.label);
+    }
+  } catch (e) {
+    mediaDevices = { error: String(e.message || e) };
+  }
+
+  return {
+    exposed: found,
+    count: found.length,
+    webgl: canvasOps,
+    mediaDevices,
+    hash: hashString(found.join("|") + JSON.stringify(canvasOps) + (mediaDevices ? JSON.stringify(mediaDevices) : ""))
+  };
 }
 
 // ---- Login-state probes (the "who am I logged in as" angle) ----

@@ -28,6 +28,18 @@ function saveVisits(visits) {
 }
 
 app.use(express.json({ limit: "2mb" }));
+
+// Advertise high-entropy client hints so Chrome actually sends them.
+// Real trackers do this; without it we'd only see low-entropy hints.
+// Must run BEFORE express.static so static files get the header too.
+app.use((req, res, next) => {
+  res.setHeader(
+    "Accept-CH",
+    "sec-ch-ua, sec-ch-ua-mobile, sec-ch-ua-platform, sec-ch-ua-platform-version, sec-ch-ua-full-version-list, sec-ch-ua-arch, sec-ch-ua-bitness, sec-ch-ua-model, sec-ch-ua-wow64, sec-ch-ua-full-version, sec-ch-prefers-color-scheme, sec-ch-prefers-reduced-motion, sec-ch-viewport-height, sec-ch-viewport-width, sec-ch-dpr, sec-ch-device-memory, sec-ch-downlink, sec-ch-ect, sec-ch-rtt"
+  );
+  next();
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 function hashId(id) {

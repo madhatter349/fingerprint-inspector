@@ -17,6 +17,8 @@ const historySection = $("#history");
 const historyBody = $("#historyBody");
 const compareSection = $("#compare");
 const compareBody = $("#compareBody");
+const verdictSection = $("#verdict");
+const verdictBody = $("#verdictBody");
 
 // Surface any uncaught JS error directly on the page so failures aren't silent.
 window.addEventListener("error", (e) => {
@@ -83,6 +85,7 @@ async function runChecks() {
   renderFingerprint();
   renderSignals();
   loadNetworkIdentity();
+  renderVerdict();
   setStatus(
     timedOut
       ? `Warning: some checks timed out (${elapsed}ms). Showing partial results below.`
@@ -131,6 +134,61 @@ async function loadNetworkIdentity() {
   } catch (e) {
     networkBody.innerHTML = `<p class="muted">Failed to load network identity: ${escapeHtml(e.message)}</p>`;
   }
+}
+
+function renderVerdict() {
+  const s = state.signals || {};
+  const parts = [];
+  let bits = 0;
+
+  const counts = {
+    audio: s.audio ? 12 : 0,
+    canvas: s.canvas ? 8 : 0,
+    webgl: s.webgl && s.webgl.unmaskedRenderer ? 14 : s.webgl ? 6 : 0,
+    fonts: s.fonts ? Math.min(s.fonts.count || 0, 10) : 0,
+    screen: s.screen ? 5 : 0,
+    locale: s.locale ? 8 : 0,
+    hints: s.clientHints && s.clientHints.highEntropy ? 12 : s.clientHints ? 4 : 0,
+    window: s.windowState ? 3 : 0,
+    api: s.apiPresence ? 4 : 0,
+    connection: s.connection && s.connection.supported ? 2 : 0
+  };
+  bits = Object.values(counts).reduce((a, b) => a + b, 0);
+
+  if (s.audio && s.audio.hash) parts.push("stable audio fingerprint");
+  if (s.canvas && s.canvas.hash) parts.push("stable canvas hash");
+  if (s.webgl && s.webgl.unmaskedRenderer) parts.push(`unmasked GPU (${s.webgl.unmaskedRenderer})`);
+  else if (s.webgl) parts.push("masked GPU");
+  if (s.fonts && s.fonts.count) parts.push(`${s.fonts.count} installed fonts`);
+  if (s.locale && s.locale.timezone) parts.push(`timezone ${s.locale.timezone}`);
+  if (s.clientHints && s.clientHints.highEntropy && s.clientHints.highEntropy.architecture) parts.push(`CPU ${s.clientHints.highEntropy.architecture}/${s.clientHints.highEntropy.bitness}`);
+  if (s.screen && s.screen.colorDepth === 30) parts.push("10-bit display");
+  if (s.windowState && s.windowState.devicePixelRatio) parts.push(`DPR ${s.windowState.devicePixelRatio}`);
+
+  const uniqueness = bits >= 40 ? "high" : bits >= 25 ? "moderate" : "low";
+  const uniqueTag = uniqueness === "high" ? tag("HIGH — near-unique device ID", "bad") : uniqueness === "moderate" ? tag("MODERATE", "warn") : tag("LOW", "good");
+
+  const verdict = document.createElement("div");
+  verdict.innerHTML = `
+    <p><strong>Estimated fingerprint entropy:</strong> ~${bits} bits ${uniqueTag}</p>
+    <p class="muted">
+      Combined, these signals distinguish your device from roughly 1 in ${Math.min(Math.pow(2, bits), 100000000).toLocaleString()}
+      browsers. In practice, a tracker seeing all of these can assign you a stable identifier without any cookies.
+    </p>
+    <h3>How an adversary would turn this into "you"</h3>
+    <ol class="muted" style="line-height:1.8">
+      <li><strong>Cookie + pixel matching:</strong> You browse site X. Site X runs a LinkedIn/Meta pixel. Your fingerprint (above) is sent to LinkedIn/Meta. If you ever log into LinkedIn/Meta on this device, their server links that fingerprint to your account. From then on, every site running that pixel knows "this visitor = your account".</li>
+      <li><strong>Email hashing (id-less matching):</strong> Some sites hash your email and share it with ad networks; the network cross-references your device fingerprint to build a profile.</li>
+      <li><strong>IP + ISP correlation:</strong> Even without any matching, your IP + fingerprint can be correlated with account logins from the same IP/subnet, narrowing to a household or device.</li>
+      <li><strong>What CAN'T be done:</strong> Reading your LinkedIn cookies, Gmail session, or other sites' storage — all blocked by design in modern browsers.</li>
+    </ol>
+    <p class="muted">
+      <strong>The bottom line:</strong> your device is uniquely fingerprintable (~${bits} bits), but mapping that fingerprint to "Josh Klein" specifically requires ONE cross-reference — logging into an account on this device while a tracking pixel is present. That single event is how the anonymous visitor becomes you.
+    </p>
+  `;
+  verdictSection.hidden = false;
+  verdictBody.innerHTML = "";
+  verdictBody.appendChild(verdict);
 }
 
 function renderSignals() {
@@ -197,7 +255,7 @@ function renderSignals() {
     html += signalCard("voices", "Speech voices", s.voices, t);
   }
   if (s.apiPresence) {
-    html += signalCard("apiPresence", "API surface", { exposed: s.apiPresence.exposed, count: s.apiPresence.count }, tag(`${s.apiPresence.count} APIs`, "warn"));
+    html += signalCard("apiPresence", "API surface", { exposed: s.apiPresence.exposed, count: s.apiPresence.count, mediaDevices: s.apiPresence.mediaDevices, webgl: s.apiPresence.webgl }, tag(`${s.apiPresence.count} APIs`, "warn"));
   }
   if (s.loginProbes) {
     html += signalCard("loginProbes", "Login-state probes", s.loginProbes, tag("blocked by design", "good"));
