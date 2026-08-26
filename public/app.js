@@ -11,6 +11,8 @@ const fpIdEl = $("#fpId");
 const fpNote = $("#fpNote");
 const signalsSection = $("#signals");
 const signalsGrid = $("#signalsGrid");
+const networkSection = $("#network");
+const networkBody = $("#networkBody");
 const historySection = $("#history");
 const historyBody = $("#historyBody");
 const compareSection = $("#compare");
@@ -80,6 +82,7 @@ async function runChecks() {
 
   renderFingerprint();
   renderSignals();
+  loadNetworkIdentity();
   setStatus(
     timedOut
       ? `Warning: some checks timed out (${elapsed}ms). Showing partial results below.`
@@ -98,6 +101,36 @@ function renderFingerprint() {
   fpIdEl.textContent = state.fp;
   fpNote.textContent =
     "This is the combined hash of the signals below. If it stays the same across tabs, sessions, and incognito, a site could identify your device without any cookies.";
+}
+
+async function loadNetworkIdentity() {
+  networkSection.hidden = false;
+  networkBody.innerHTML = `<span class="spinner"></span> Loading…`;
+  try {
+    const res = await fetch("/api/whoami");
+    if (!res.ok) throw new Error("status " + res.status);
+    const data = await res.json();
+    networkBody.innerHTML = `
+      <div class="grid">
+        <div class="signal">
+          <h3>IP address</h3>
+          <pre>${escapeHtml(JSON.stringify({ ip: data.ip, coarse: data.ipCoarse, geo: data.geo || null }, null, 2))}</pre>
+        </div>
+        <div class="signal">
+          <h3>Client hints (sent to every server)${Object.keys(data.clientHints || {}).length ? tag("high entropy", "bad") : tag("none sent", "good")}</h3>
+          <pre>${escapeHtml(JSON.stringify(data.clientHints, null, 2))}</pre>
+        </div>
+        <div class="signal">
+          <h3>Request headers</h3>
+          <pre>${escapeHtml(JSON.stringify(data.headers, null, 2))}</pre>
+        </div>
+      </div>
+      <p class="muted">${escapeHtml(data.ipNote || "")}</p>
+      <p class="muted">${escapeHtml(data.clientHintsNote || "")}</p>
+    `;
+  } catch (e) {
+    networkBody.innerHTML = `<p class="muted">Failed to load network identity: ${escapeHtml(e.message)}</p>`;
+  }
 }
 
 function renderSignals() {
@@ -141,6 +174,33 @@ function renderSignals() {
       ? tag("3rd-party cookies possible", "bad")
       : tag("3rd-party cookies blocked/absent", "good");
     html += signalCard("linkedin", "LinkedIn session context (local)", { ...s.linkedin, thirdPartyCookiesNote: undefined }, tpc);
+  }
+  if (s.clientHints) {
+    const has = s.clientHints.uaData || s.clientHints.deviceMemory;
+    html += signalCard("clientHints", "Client hints", s.clientHints, has ? tag("high entropy", "bad") : tag("minimal", "good"));
+  }
+  if (s.locale) {
+    html += signalCard("locale", "Locale / timezone", s.locale, tag("strong", "warn"));
+  }
+  if (s.media) {
+    html += signalCard("media", "Media features / CSS", s.media, tag("unique-ish", "warn"));
+  }
+  if (s.connection) {
+    const t = s.connection.supported ? tag("reveals network type", "warn") : tag("not exposed", "good");
+    html += signalCard("connection", "Network connection", s.connection, t);
+  }
+  if (s.windowState) {
+    html += signalCard("windowState", "Window state", s.windowState, tag("leaks position/size", "warn"));
+  }
+  if (s.voices) {
+    const t = s.voices.count > 0 ? tag(`${s.voices.count} voices`, "warn") : tag("", "");
+    html += signalCard("voices", "Speech voices", s.voices, t);
+  }
+  if (s.apiPresence) {
+    html += signalCard("apiPresence", "API surface", { exposed: s.apiPresence.exposed, count: s.apiPresence.count }, tag(`${s.apiPresence.count} APIs`, "warn"));
+  }
+  if (s.loginProbes) {
+    html += signalCard("loginProbes", "Login-state probes", s.loginProbes, tag("blocked by design", "good"));
   }
 
   const errs = Object.keys(state.errors || {});

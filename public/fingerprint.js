@@ -16,7 +16,15 @@ export async function collectAllSignals() {
     ["device", collectDeviceInfo],
     ["storage", collectStorageInfo],
     ["userAgent", collectUserAgentInfo],
-    ["linkedin", collectLinkedInContext]
+    ["linkedin", collectLinkedInContext],
+    ["clientHints", collectClientHints],
+    ["locale", collectLocaleInfo],
+    ["media", collectMediaFeatures],
+    ["connection", collectConnectionInfo],
+    ["windowState", collectWindowState],
+    ["voices", collectVoices],
+    ["apiPresence", collectApiPresence],
+    ["loginProbes", collectLoginProbes]
   ];
 
   await Promise.allSettled(
@@ -327,6 +335,158 @@ function collectUserAgentInfo() {
   return { ...data, hash: hashString(ua + navigator.platform + navigator.language) };
 }
 
+// ---- Client hints (JS-accessible subset) ----
+function collectClientHints() {
+  const nav = navigator;
+  return {
+    uaData: nav.userAgentData
+      ? {
+          brands: nav.userAgentData.brands,
+          mobile: nav.userAgentData.mobile,
+          platform: nav.userAgentData.platform,
+          fullVersionList: nav.userAgentData.highEntropyValues
+            ? null // filled below if available
+            : null
+        }
+      : null,
+    deviceMemory: nav.deviceMemory || null,
+    hardwareConcurrency: nav.hardwareConcurrency || null,
+    maxTouchPoints: nav.maxTouchPoints || 0,
+    hash: hashString(
+      JSON.stringify(nav.userAgentData ? nav.userAgentData.brands : "") +
+      (nav.deviceMemory || "") + (nav.hardwareConcurrency || "") + (nav.maxTouchPoints || 0)
+    )
+  };
+}
+
+// ---- Locale / timezone ----
+function collectLocaleInfo() {
+  return {
+    language: navigator.language,
+    languages: navigator.languages,
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    offsetMin: new Date().getTimezoneOffset(),
+    hash: hashString(navigator.language + "|" + navigator.languages.join(",") + "|" + Intl.DateTimeFormat().resolvedOptions().timeZone)
+  };
+}
+
+// ---- Media features / CSS queries ----
+function collectMediaFeatures() {
+  const mm = window.matchMedia;
+  const out = {
+    prefersColorScheme: mm ? (mm("(prefers-color-scheme: dark)").matches ? "dark" : "light") : null,
+    prefersReducedMotion: mm ? mm("(prefers-reduced-motion: reduce)").matches : null,
+    prefersReducedTransparency: mm ? mm("(prefers-reduced-transparency: reduce)").matches : null,
+    pointer: mm ? (mm("(pointer: coarse)").matches ? "coarse" : mm("(pointer: fine)").matches ? "fine" : null) : null,
+    hover: mm ? (mm("(hover: none)").matches ? "none" : mm("(hover: hover)").matches ? "hover" : null) : null,
+    anyPointer: mm ? (mm("(any-pointer: coarse)").matches ? "coarse" : mm("(any-pointer: fine)").matches ? "fine" : null) : null,
+    minContrast: mm ? mm("(prefers-contrast: more)").matches : null,
+    forcedColors: mm ? mm("(forced-colors: active)").matches : null
+  };
+  return { ...out, hash: hashString(JSON.stringify(out)) };
+}
+
+// ---- Network connection (only useful if a live connection exists) ----
+function collectConnectionInfo() {
+  const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+  if (!conn) return { supported: false, note: "Network Information API not exposed." };
+  return {
+    supported: true,
+    effectiveType: conn.effectiveType,
+    downlink: conn.downlink,
+    rtt: conn.rtt,
+    saveData: conn.saveData,
+    type: conn.type,
+    hash: hashString(JSON.stringify({ et: conn.effectiveType, dl: conn.downlink, rtt: conn.rtt, save: conn.saveData }))
+  };
+}
+
+// ---- Window state (leaks approximate dimensions & position) ----
+function collectWindowState() {
+  const w = window;
+  return {
+    innerWidth: w.innerWidth,
+    innerHeight: w.innerHeight,
+    outerWidth: w.outerWidth,
+    outerHeight: w.outerHeight,
+    screenX: w.screenX,
+    screenY: w.screenY,
+    devicePixelRatio: w.devicePixelRatio,
+    hash: hashString(JSON.stringify({ iw: w.innerWidth, ih: w.innerHeight, ow: w.outerWidth, oh: w.outerHeight, sx: w.screenX, sy: w.screenY, dpr: w.devicePixelRatio }))
+  };
+}
+
+// ---- Speech synthesis voices ----
+function collectVoices() {
+  return new Promise((resolve) => {
+    if (!window.speechSynthesis) return resolve({ supported: false });
+    const voices = window.speechSynthesis.getVoices();
+    if (voices.length) {
+      resolve({ supported: true, count: voices.length, sample: voices.slice(0, 8).map((v) => v.name + "(" + v.lang + ")"), hash: hashString(voices.map((v) => v.name + v.lang).join("|")) });
+      return;
+    }
+    // Voices load async in Chrome.
+    window.speechSynthesis.onvoiceschanged = () => {
+      const vs = window.speechSynthesis.getVoices();
+      resolve({ supported: true, count: vs.length, sample: vs.slice(0, 8).map((v) => v.name + "(" + v.lang + ")"), hash: hashString(vs.map((v) => v.name + v.lang).join("|")) });
+    };
+    setTimeout(() => resolve({ supported: true, count: 0, note: "voices not loaded within 2s", hash: hashString("") }), 2000);
+  });
+}
+
+// ---- API surface (adds to uniqueness) ----
+function collectApiPresence() {
+  const props = [
+    "serviceWorker", "geolocation", "mediaDevices", "bluetooth", "usb", "hid", "serial",
+    "permissions", "credentials", "storage", "indexedDB", "caches", "scheduling",
+    "share", "vibrate", "getBattery", "wakeLock", "contacts", "doNotTrack",
+    "webdriver", "languages", "pdfViewerEnabled", "serial", "wakeLock"
+  ];
+  const found = props.filter((p) => typeof navigator[p] !== "undefined" || (p === "vibrate" && typeof navigator.vibrate === "function"));
+  const canvasOps = (() => {
+    const c = document.createElement("canvas");
+    const gl = c.getContext("webgl") || c.getContext("experimental-webgl");
+    return gl ? { vendor: gl.getParameter(gl.VENDOR), renderer: gl.getParameter(gl.RENDERER) } : null;
+  })();
+  return { exposed: found, count: found.length, webgl: canvasOps, hash: hashString(found.join("|") + JSON.stringify(canvasOps)) };
+}
+
+// ---- Login-state probes (the "who am I logged in as" angle) ----
+// Modern browsers forbid reading other sites' cookies. The remaining real-world
+// leak is ad-tech account linking via pixels. What we CAN probe from first-party:
+function collectLoginProbes() {
+  return new Promise((resolve) => {
+    const out = {
+      note: "Cross-origin cookie reads are blocked by modern browsers. These probes show what is (and isn't) possible from a first-party page.",
+      fedcm: null,
+      fedcmNote: null,
+      loginHints: null,
+      loginHintsNote: null
+    };
+
+    // 1. FedCM identity providers (Chrome 117+): reveals which IDPs the browser
+    //    knows the user is signed into, WITHOUT user interaction.
+    if (navigator.credentials && typeof navigator.credentials.get === "function" && "IdentityCredential" in window) {
+      out.fedcmSupported = true;
+      // We do NOT actually call FedCM here (it requires user mediation and is
+      // gated). We report whether the API is present so the reader knows it's
+      // the official mechanism by which sites detect sign-in state.
+      out.fedcm = "API present — can reveal signed-in identity providers after user consent";
+    } else {
+      out.fedcmSupported = false;
+    }
+
+    // 2. Fetch preflight / resource timing hints. Loading a known cross-origin
+    //    asset (e.g. a favicon) and timing it reveals very little in modern
+    //    browsers, but a 403/200 difference on a third-party endpoint is the
+    //    classic login-detection trick. We only demonstrate the mechanism.
+    //    We do NOT hit third parties; we show the technique is monitored.
+    out.loginHints = "Cross-site login detection is blocked (Cookies partitioned). LinkedIn/Google/GitHub cannot be probed from this origin.";
+
+    resolve(out);
+  });
+}
+
 // ---- Helper: stable string hash (FNV-1a) ----
 function hashString(str) {
   let h = 0x811c9dc5;
@@ -348,5 +508,12 @@ export function combineFingerprint(signals) {
   if (signals.screen) parts.push("screen:" + hashString(JSON.stringify(signals.screen)));
   if (signals.device) parts.push("device:" + hashString(JSON.stringify(signals.device)));
   if (signals.userAgent) parts.push("ua:" + signals.userAgent.hash);
+  if (signals.clientHints) parts.push("hints:" + signals.clientHints.hash);
+  if (signals.locale) parts.push("locale:" + signals.locale.hash);
+  if (signals.media) parts.push("media:" + signals.media.hash);
+  if (signals.connection && signals.connection.supported) parts.push("conn:" + signals.connection.hash);
+  if (signals.windowState) parts.push("win:" + signals.windowState.hash);
+  if (signals.voices && signals.voices.supported) parts.push("voices:" + signals.voices.hash);
+  if (signals.apiPresence) parts.push("api:" + signals.apiPresence.hash);
   return hashString(parts.join("|"));
 }
