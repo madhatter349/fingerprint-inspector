@@ -19,6 +19,8 @@ const compareSection = $("#compare");
 const compareBody = $("#compareBody");
 const verdictSection = $("#verdict");
 const verdictBody = $("#verdictBody");
+const labSection = $("#lab");
+const labBody = $("#labBody");
 
 // Surface any uncaught JS error directly on the page so failures aren't silent.
 window.addEventListener("error", (e) => {
@@ -86,6 +88,7 @@ async function runChecks() {
   renderSignals();
   loadNetworkIdentity();
   renderVerdict();
+  runTrackingLab();
   setStatus(
     timedOut
       ? `Warning: some checks timed out (${elapsed}ms). Showing partial results below.`
@@ -134,6 +137,92 @@ async function loadNetworkIdentity() {
   } catch (e) {
     networkBody.innerHTML = `<p class="muted">Failed to load network identity: ${escapeHtml(e.message)}</p>`;
   }
+}
+
+async function runTrackingLab() {
+  labSection.hidden = false;
+  labBody.innerHTML = `<span class="spinner"></span> Running live tracking probes…`;
+
+  const results = {};
+
+  async function probe(name, url, opts) {
+    try {
+      const r = await fetch(url, opts);
+      const j = await r.json();
+      results[name] = j;
+    } catch (e) {
+      results[name] = { error: e.message };
+    }
+  }
+
+  // 1. First-party cookie
+  await probe("cookie", "/api/lab/cookie");
+  // 2. ETag supercookie: load the tiny SVG (caches it), then probe reads it back.
+  try { await fetch("/api/lab/etag", { cache: "no-store" }); } catch (e) {}
+  await probe("etag", "/api/lab/etag/probe");
+  // 3. Referrer journey
+  await probe("referrer", "/api/lab/referrer");
+  // 4. Correlated profile (cookie + etag + ip)
+  await probe("profile", "/api/lab/profile");
+  // 5. Storage persistence (local probe)
+  try {
+    const k = "__fp_lab_store__";
+    const before = localStorage.getItem(k);
+    if (!before) localStorage.setItem(k, Date.now().toString(36));
+    results.storage = {
+      note: "localStorage survives tab close and 'clear cookies' in most browsers. A site stores an ID here and reads it back next visit.",
+      priorValue: before || "(new)",
+      storageCount: localStorage.length
+    };
+  } catch (e) {
+    results.storage = { error: e.message };
+  }
+
+  renderLab(results);
+}
+
+function renderLab(results) {
+  const card = (title, data, tagHtml, extraNote) => `
+    <div class="signal">
+      <h3>${title}${tagHtml || ""}</h3>
+      <pre>${escapeHtml(pretty(data))}</pre>
+      ${extraNote ? `<p class="muted">${extraNote}</p>` : ""}
+    </div>
+  `;
+
+  const cookieC = results.cookie && results.cookie.isNew === false
+    ? tag("you're already identified", "bad")
+    : results.cookie ? tag("new visitor", "good") : "";
+  const etagC = results.etag && results.etag.isCached
+    ? tag("re-identified via cache, NO cookie", "bad")
+    : results.etag ? tag("not cached yet — refresh to see it persist", "warn") : "";
+
+  let html = '<div class="grid">';
+  html += card("1. First-party cookie", results.cookie || { error: "failed" }, cookieC,
+    "Every site sets one of these. It's your 'visitor ID' for that site. Cleared only by clearing cookies or incognito.");
+  html += card("2. ETag supercookie (cache)", results.etag || { error: "failed" }, etagC,
+    "Your browser caches this tiny SVG with a unique ETag. Next visit, the browser sends the ETag back in If-None-Match — the site reads your ID from the HTTP cache with NO cookie. Survives cookie clearing.");
+  html += card("3. Where you came from (referrer)", results.referrer || { error: "failed" },
+    results.referrer && results.referrer.referer ? tag("leaked", "bad") : tag("absent", "good"),
+    "Sites see the page you were on before this one via the Referer header. This is how ads and analytics know you came from a search, a social post, or a newsletter.");
+  html += card("4. Correlated profile", results.profile || { error: "failed" }, "",
+    "The cookie ID, ETag ID, IP, and fingerprint are all stored together. Any one re-identifies you; all together make you unique.");
+  html += card("5. localStorage persistence", results.storage || { error: "failed" }, "",
+    "An ID in localStorage survives tab close and often survives 'clear cookies' — a cookie alternative that many sites use.");
+  html += "</div>";
+
+  html += `
+    <h3 style="margin-top:18px">How this maps to the real world</h3>
+    <ol class="muted" style="line-height:1.9">
+      <li><strong>Every site you visit</strong> sets its own first-party cookie + localStorage ID (mechanisms 1 &amp; 5). That's how a single site remembers you — no third party needed.</li>
+      <li><strong>Ad networks (Google, Meta, LinkedIn)</strong> get their own third-party cookie — now blocked — so they've moved to <em>pixels</em>: a tiny script the site embeds. The pixel reports <em>your site's</em> fingerprint, IP, and referrer to the ad network.</li>
+      <li><strong>The click happens when you log in.</strong> The ad network already has a device fingerprint for you (from millions of other sites' pixels). The moment you log into that network (e.g. Meta) on this device, it links that fingerprint to your account. From then on, every site with their pixel knows it's you.</li>
+      <li><strong>ETag/cache supercookies</strong> (mechanism 2) are the old-school revival — many browsers now block them, but the pattern shows how persistent tracking evades cookie controls.</li>
+      <li><strong>CNAME cloaking:</strong> a site points a first-party subdomain (e.g. track.mysite.com) at an ad network's server. Your browser sees it as first-party, so it accepts the cookie. This is a current, working technique.</li>
+    </ol>
+  `;
+
+  labBody.innerHTML = html;
 }
 
 function renderVerdict() {

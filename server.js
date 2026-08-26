@@ -6,6 +6,18 @@ import fs from "node:fs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
+
+// Minimal cookie parser (avoids a dependency).
+function getCookie(req, name) {
+  const header = req.headers.cookie || "";
+  for (const part of header.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx === -1) continue;
+    const key = part.slice(0, idx).trim();
+    if (key === name) return decodeURIComponent(part.slice(idx + 1).trim());
+  }
+  return null;
+}
 const PORT = process.env.PORT || 3000;
 
 // In-memory store of visits. On Railway each instance keeps its own copy,
@@ -163,6 +175,111 @@ app.get("/api/whoami", (req, res) => {
     out.ipCoarse = parts + ".x.x";
     res.json(out);
   }
+});
+
+// ---------------------------------------------------------------------------
+// TRACKING LAB — the actual mechanisms sites use to identify visitors.
+// Everything here is first-party (this site's own cookies/storage), which is
+// exactly how every site tracks its visitors. Third-party cookies are blocked,
+// but first-party mechanisms work everywhere.
+// ---------------------------------------------------------------------------
+
+// 1. First-party visitor cookie: the baseline mechanism.
+//    Sets __fp_vid (6 months) and __fp_session (session-only). Real sites do
+//    this with their own ID. Works even when third-party cookies are blocked.
+app.get("/api/lab/cookie", (req, res) => {
+  let vid = getCookie(req, "__fp_vid") || null;
+  const isNew = !vid;
+  if (!vid) {
+    vid = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+  }
+  res.setHeader("Set-Cookie", [
+    `__fp_vid=${vid}; Path=/; Max-Age=${60 * 60 * 24 * 180}; SameSite=Lax`,
+    `__fp_session=${crypto.randomUUID().slice(0, 8)}; Path=/; HttpOnly; SameSite=Lax`
+  ]);
+  res.json({ vid, isNew, note: "First-party cookie set by every site. Survives tab close; cleared by 'clear cookies' or incognito." });
+});
+
+// 2. ETag supercookie: an ID stored in the browser HTTP cache (as a weak ETag).
+//    Real trick: a unique ID per visitor baked into the ETag. Browser revalidates
+//    the next visit with If-None-Match -> server reads the ID from the request.
+//    Survives cookie deletion (cache persists) and even some incognito windows
+//    (Chrome incognito keeps the cache from the session that opened it).
+app.get("/api/lab/etag", (req, res) => {
+  const inMatch = req.headers["if-none-match"] || "";
+  const cached = /^W\/"fp-([0-9a-f]+)"/.exec(inMatch);
+  const id = cached ? cached[1] : crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+  // Weak ETag so browsers always cache; value doubles as the visitor ID.
+  res.setHeader("ETag", `W/"fp-${id}"`);
+  res.setHeader("Cache-Control", "private, max-age=31536000, immutable");
+  res.setHeader("Content-Type", "image/svg+xml");
+  res.send(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect width="1" height="1" fill="#00000000"/></svg>`
+  );
+});
+
+// ETag probe: report what the browser has cached for us.
+app.get("/api/lab/etag/probe", (req, res) => {
+  const inMatch = req.headers["if-none-match"] || "";
+  const cached = /^W\/"fp-([0-9a-f]+)"/.exec(inMatch);
+  res.json({
+    etagId: cached ? cached[1] : null,
+    isCached: !!cached,
+    viaHeader: inMatch || null,
+    note: cached
+      ? "Your browser sent back the ETag ID we gave you earlier — we recognized you across page loads from the HTTP cache, with NO cookie."
+      : "No cached ETag yet. Load the ETag endpoint first, then reload this probe to see the browser 'phone home' its ID."
+  });
+});
+
+// 3. Referrer / navigation journey: what the server learns about where you came from.
+app.get("/api/lab/referrer", (req, res) => {
+  res.json({
+    referer: req.headers.referer || null,
+    secFetchSite: req.headers["sec-fetch-site"] || null,
+    userAgent: req.headers["user-agent"] || null,
+    note: "Every navigation sends a Referer header by default (unless Referrer-Policy or an extension strips it). This is how sites know you came from a Google search, a LinkedIn ad, or a newsletter."
+  });
+});
+
+// 4. The 'correlated profile': what a real tracker assembles from the above.
+//    Demonstrates the *linkage* between cookie ID, ETag ID, IP, and fingerprint.
+app.get("/api/lab/profile", (req, res) => {
+  const cookieId = getCookie(req, "__fp_vid") || null;
+  const inMatch = req.headers["if-none-match"] || "";
+  const cachedEtag = /^W\/"fp-([0-9a-f]+)"/.exec(inMatch);
+  const etagId = cachedEtag ? cachedEtag[1] : null;
+  const forwarded = req.headers["x-forwarded-for"] || req.ip || "";
+  const ip = forwarded.split(",")[0].trim() || "unknown";
+
+  res.json({
+    cookieId,
+    etagId,
+    ip: ip.split(".").slice(0, 2).join(".") + ".x.x",
+    correlates: {
+      cookieAndEtagMatch: cookieId ? "independent IDs" : "no cookie yet",
+      note: "A tracker stores all of these together: cookie ID, ETag ID, IP, and the client-side fingerprint. Any ONE of them recognizes you later; all of them together make you near-unique."
+    }
+  });
+});
+
+// 5. Storage persistence probe (localStorage / sessionStorage / indexedDB).
+//    This is the "storage resurrection" family: IDs stored outside cookies.
+app.get("/api/lab/storage", (_req, res) => {
+  res.json({
+    note: "Client-side storage (localStorage, IndexedDB, Cache API, WebSQL) is a first-party cookie alternative. Sites store an ID there and read it back next visit. Survives 'clear cookies' (many users clear cookies but not site data), survives incognito differently per-browser."
+  });
+});
+
+// 6. The big one — cross-site identity via the 'referrer + pixel' chain.
+//    We can't actually call LinkedIn/Meta from here, but we explain the chain
+//    and show the referrer component live.
+app.get("/api/lab/pixel", (req, res) => {
+  res.json({
+    note: "A tracking pixel is just an <img>/<script> to a third party (LinkedIn Insight Tag, Meta Pixel, Google Analytics). The third party sees: referrer (what site you're on), the site's fingerprint of you, your IP, and your User-Agent. If you've EVER logged into that third party on this device, they already have a profile for this device fingerprint.",
+    referrerToThirdParty: req.headers.referer || null,
+    ip: (req.headers["x-forwarded-for"] || req.ip || "").split(",")[0].trim() || "unknown"
+  });
 });
 
 app.listen(PORT, () => {
