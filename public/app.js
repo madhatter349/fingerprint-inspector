@@ -1,4 +1,4 @@
-import { collectAllSignals, combineFingerprint } from "/fingerprint.js";
+import { collectAllSignals, combineFingerprint } from "/fingerprint.js?v=4";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -15,6 +15,14 @@ const historySection = $("#history");
 const historyBody = $("#historyBody");
 const compareSection = $("#compare");
 const compareBody = $("#compareBody");
+
+// Surface any uncaught JS error directly on the page so failures aren't silent.
+window.addEventListener("error", (e) => {
+  if (statusText) statusText.innerHTML = `<strong style="color:#ff5d5d">JS error:</strong> ${escapeHtml(e.message || String(e))}`;
+});
+window.addEventListener("unhandledrejection", (e) => {
+  if (statusText) statusText.innerHTML = `<strong style="color:#ff5d5d">JS error:</strong> ${escapeHtml(e.reason && e.reason.message ? e.reason.message : String(e.reason))}`;
+});
 
 let state = {
   signals: null,
@@ -56,17 +64,27 @@ async function runChecks() {
   saveBtn.disabled = true;
 
   const t0 = performance.now();
-  const { results, errors } = await collectAllSignals();
+  let result;
+  // Watchdog: even if a check hangs, render after 12s with whatever we have.
+  const watchdog = new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), 12000));
+  const finished = collectAllSignals().then((r) => ({ ...r, timedOut: false }));
+  result = await Promise.race([finished, watchdog]);
+
+  const { results, errors, timedOut } = result;
   const elapsed = Math.round(performance.now() - t0);
 
-  state.signals = results;
-  state.errors = errors;
-  state.fp = combineFingerprint(results);
+  state.signals = results || {};
+  state.errors = errors || {};
+  state.fp = combineFingerprint(state.signals);
   state.saved = false;
 
   renderFingerprint();
   renderSignals();
-  setStatus(`Checks complete in ${elapsed}ms. Click "Save this visit" to store it on the server for comparison.`);
+  setStatus(
+    timedOut
+      ? `Warning: some checks timed out (${elapsed}ms). Showing partial results below.`
+      : `Checks complete in ${elapsed}ms. Click "Save this visit" to store it on the server for comparison.`
+  );
   runBtn.disabled = false;
   saveBtn.disabled = false;
   historyBtn.disabled = false;
