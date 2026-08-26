@@ -6,26 +6,40 @@ export async function collectAllSignals() {
   const results = {};
   const errors = {};
 
-  async function run(name, fn) {
-    try {
-      results[name] = await fn();
-    } catch (e) {
-      errors[name] = String(e && e.message ? e.message : e);
-    }
-  }
+  const defs = [
+    ["audio", collectAudioFingerprint],
+    ["canvas", collectCanvasFingerprint],
+    ["webgl", collectWebGLFingerprint],
+    ["fonts", collectFontsFingerprint],
+    ["webrtc", collectWebRTCFingerprint],
+    ["screen", collectScreenInfo],
+    ["device", collectDeviceInfo],
+    ["storage", collectStorageInfo],
+    ["userAgent", collectUserAgentInfo],
+    ["linkedin", collectLinkedInContext]
+  ];
 
-  await run("audio", collectAudioFingerprint);
-  await run("canvas", collectCanvasFingerprint);
-  await run("webgl", collectWebGLFingerprint);
-  await run("fonts", collectFontsFingerprint);
-  await run("webrtc", collectWebRTCFingerprint);
-  await run("screen", collectScreenInfo);
-  await run("device", collectDeviceInfo);
-  await run("storage", collectStorageInfo);
-  await run("userAgent", collectUserAgentInfo);
-  await run("linkedin", collectLinkedInContext);
+  await Promise.allSettled(
+    defs.map(async ([name, fn]) => {
+      try {
+        results[name] = await withTimeout(fn(), 5000, name);
+      } catch (e) {
+        errors[name] = String(e && e.message ? e.message : e);
+      }
+    })
+  );
 
   return { results, errors };
+}
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(label + " timed out after " + ms + "ms")), ms);
+    })
+  ]).finally(() => clearTimeout(timer));
 }
 
 // ---- Audio fingerprint (Web Audio API) ----
@@ -39,81 +53,48 @@ const DURATION = 1; // seconds
 const TEST_FREQ = 440;
 const NUM_OCTAVES = 4;
 
-function buildAudioGraph(ctx, oscillatorType, freq) {
-  const dest = ctx.createMediaStreamDestination();
-  const osc = ctx.createOscillator();
-  const gain = ctx.createGain();
-  const filter = ctx.createBiquadFilter();
-
-  osc.type = oscillatorType;
-  osc.frequency.value = freq;
-
-  filter.type = "lowpass";
-  filter.frequency.value = 22000;
-
-  gain.gain.value = 0; // silent — never audible
-
-  osc.connect(filter);
-  filter.connect(gain);
-  gain.connect(dest);
-
-  return { osc, dest };
-}
-
 function collectAudioFingerprint() {
   return new Promise((resolve, reject) => {
     try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      ctx.suspend().then(() => {
-        const graphs = [];
-        for (let octave = 0; octave < NUM_OCTAVES; octave++) {
-          graphs.push(buildAudioGraph(ctx, "sine", TEST_FREQ * Math.pow(2, octave)));
+      // Use OfflineAudioContext only — deterministic, needs no live audio device,
+      // and cannot hang on a realtime AudioContext.suspend() (which is the
+      // failure mode that left this page stuck on "Initializing…").
+      const off = new (window.OfflineAudioContext || window.webkitOfflineAudioContext)(
+        NUM_CHANNELS,
+        SAMPLE_RATE * DURATION,
+        SAMPLE_RATE
+      );
+
+      const masterGain = off.createGain();
+      masterGain.gain.value = 0; // silent — never audible
+      masterGain.connect(off.destination);
+
+      for (let octave = 0; octave < NUM_OCTAVES; octave++) {
+        const osc = off.createOscillator();
+        osc.type = "sine";
+        osc.frequency.value = TEST_FREQ * Math.pow(2, octave);
+        osc.connect(masterGain);
+        osc.start(0);
+      }
+
+      off.startRendering().then((rendered) => {
+        const data = rendered.getChannelData(0);
+        // Quantize the samples into a compact hash. Real fingerprinting uses
+        // more elaborate feature extraction; this is a representative demo.
+        let acc = 0;
+        const step = Math.floor(data.length / 1024);
+        for (let i = 0; i < data.length; i += step) {
+          const sample = Math.round((data[i] + 1) * 128);
+          acc = (acc * 31 + sample) | 0;
         }
-
-        // Render 1 second of the merged graph to an offline buffer.
-        const off = new OfflineAudioContext(NUM_CHANNELS, SAMPLE_RATE * DURATION, SAMPLE_RATE);
-        const masterGain = off.createGain();
-        masterGain.gain.value = 0; // silent
-        const masterOsc = off.createOscillator();
-        masterOsc.type = "sine";
-        masterOsc.frequency.value = TEST_FREQ;
-        masterOsc.connect(masterGain);
-        masterGain.connect(off.destination);
-
-        graphs.forEach((g) => {
-          const src = off.createBufferSource();
-          src.buffer = off.createBuffer(NUM_CHANNELS, SAMPLE_RATE, SAMPLE_RATE);
-          // Fill with the same reference tone; differences in how it renders are the fingerprint.
-          const data = src.buffer.getChannelData(0);
-          for (let i = 0; i < data.length; i++) {
-            data[i] = Math.sin((2 * Math.PI * TEST_FREQ * i) / SAMPLE_RATE);
-          }
-          src.connect(off.destination);
-          src.start(0);
-        });
-
-        // Start at realtime context to make sure the graph is "active" like AliExpress's.
-        graphs.forEach((g) => g.osc.start(0));
-
-        off.startRendering().then((rendered) => {
-          const data = rendered.getChannelData(0);
-          // Quantize the samples into a compact hash. Real fingerprinting uses
-          // more elaborate feature extraction; this is a representative demo.
-          let acc = 0;
-          const step = Math.floor(data.length / 1024);
-          for (let i = 0; i < data.length; i += step) {
-            const sample = Math.round((data[i] + 1) * 128);
-            acc = (acc * 31 + sample) | 0;
-          }
-          resolve({
-            sampleRate: ctx.sampleRate,
-            state: ctx.state,
-            hash: Math.abs(acc).toString(16).padStart(8, "0"),
-            duration: DURATION,
-            zeroGain: true,
-            technique: "web-audio-offline-render",
-            note: "Silent zero-gain graph rendering a reference tone; hardware-specific differences produce a stable, cookie-free identifier."
-          });
+        resolve({
+          sampleRate: off.sampleRate,
+          length: data.length,
+          hash: Math.abs(acc).toString(16).padStart(8, "0"),
+          duration: DURATION,
+          zeroGain: true,
+          technique: "web-audio-offline-render",
+          note: "Silent zero-gain graph rendering a reference tone; hardware-specific differences produce a stable, cookie-free identifier."
         });
       });
     } catch (e) {
